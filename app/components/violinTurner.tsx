@@ -97,7 +97,7 @@ export default function ViolinTuner() {
   const lastUiUpdateRef = useRef(0);
   const lastSignalRef = useRef(0);
 
-  const detect = useCallback(() => {
+  const detect = useCallback(function detectFrame() {
     if (!analyserRef.current || !bufferRef.current || !audioCtxRef.current) return;
     analyserRef.current.getFloatTimeDomainData(bufferRef.current);
 
@@ -123,7 +123,7 @@ export default function ViolinTuner() {
       setFreq(null);
       setNote(null);
     }
-    animRef.current = requestAnimationFrame(detect);
+    animRef.current = requestAnimationFrame(detectFrame);
   }, []);
 
   const start = async (): Promise<void> => {
@@ -170,7 +170,7 @@ export default function ViolinTuner() {
     setNote(null);
     smoothedFreqRef.current = null;
     lastUiUpdateRef.current = 0;
-    lastSignalRef.current = performance.now();
+    lastSignalRef.current = 0;
   };
 
   const cents = freq ? centsFromTarget(freq, selectedString.freq) : 0;
