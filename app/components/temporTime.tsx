@@ -37,18 +37,24 @@ export default function TempoTimer() {
 
   const tempo = getTempoForBpm(bpm);
 
-  function playClick(accent: boolean) {
+  function playClick(accent: boolean, beatIndex: number) {
     if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
     const ctx = audioCtxRef.current;
+    if (ctx.state === "suspended") void ctx.resume();
+
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
+    const now = ctx.currentTime;
+    const duration = accent ? 0.075 : 0.055;
+
+    osc.type = "square";
     osc.connect(gain);
     gain.connect(ctx.destination);
-    osc.frequency.value = accent ? 1800 : 1200;
-    gain.gain.setValueAtTime(accent ? 0.4 : 0.2, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.06);
-    osc.start(ctx.currentTime);
-    osc.stop(ctx.currentTime + 0.06);
+    osc.frequency.setValueAtTime(accent ? 1800 : beatIndex % 2 === 0 ? 1150 : 760, now);
+    gain.gain.setValueAtTime(accent ? 0.38 : 0.22, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    osc.start(now);
+    osc.stop(now + duration);
   }
 
   function startStop() {
@@ -63,7 +69,7 @@ export default function TempoTimer() {
       setBeat(0);
       const tick = () => {
         const isAccent = accentFirst && beatRef.current === 0;
-        playClick(isAccent);
+        playClick(isAccent, beatRef.current);
         setBeat(beatRef.current);
         beatRef.current = (beatRef.current + 1) % beatsPerBar;
       };
@@ -78,7 +84,7 @@ export default function TempoTimer() {
     clearInterval(intervalRef.current!);
     intervalRef.current = setInterval(() => {
       const isAccent = accentFirst && beatRef.current === 0;
-      playClick(isAccent);
+      playClick(isAccent, beatRef.current);
       setBeat(beatRef.current);
       beatRef.current = (beatRef.current + 1) % beatsPerBar;
     }, (60 / bpm) * 1000);
