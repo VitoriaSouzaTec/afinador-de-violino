@@ -4,32 +4,52 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 interface ViolinString {
   name: string;
+  label: string;
   freq: number;
+  hint: string;
 }
 
 interface NoteInfo {
   name: string;
+  label: string;
   cents: number;
   targetFreq: number;
 }
 
 const STRINGS: ViolinString[] = [
-  { name: "G", freq: 196.0 },
-  { name: "D", freq: 293.66 },
-  { name: "A", freq: 440.0 },
-  { name: "E", freq: 659.25 },
+  { name: "G", label: "Sol", freq: 196.0, hint: "corda grave" },
+  { name: "D", label: "Ré", freq: 293.66, hint: "segunda corda" },
+  { name: "A", label: "Lá", freq: 440.0, hint: "referência" },
+  { name: "E", label: "Mi", freq: 659.25, hint: "corda aguda" },
 ];
 
-const NOTE_NAMES: string[] = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+const NOTE_NAMES: { name: string; label: string }[] = [
+  { name: "C", label: "Dó" },
+  { name: "C#", label: "Dó#" },
+  { name: "D", label: "Ré" },
+  { name: "D#", label: "Ré#" },
+  { name: "E", label: "Mi" },
+  { name: "F", label: "Fá" },
+  { name: "F#", label: "Fá#" },
+  { name: "G", label: "Sol" },
+  { name: "G#", label: "Sol#" },
+  { name: "A", label: "Lá" },
+  { name: "A#", label: "Lá#" },
+  { name: "B", label: "Si" },
+];
 
 function freqToNote(freq: number): NoteInfo | null {
   if (!freq || freq < 50) return null;
   const semitones = 12 * Math.log2(freq / 440);
   const noteIndex = Math.round(semitones) + 9;
-  const name = NOTE_NAMES[((noteIndex % 12) + 12) % 12];
+  const note = NOTE_NAMES[((noteIndex % 12) + 12) % 12];
   const targetFreq = 440 * Math.pow(2, Math.round(semitones) / 12);
   const cents = Math.round(1200 * Math.log2(freq / targetFreq));
-  return { name, cents, targetFreq };
+  return { name: note.name, label: note.label, cents, targetFreq };
+}
+
+function centsFromTarget(freq: number, targetFreq: number): number {
+  return Math.round(1200 * Math.log2(freq / targetFreq));
 }
 
 function autoCorrelate(buffer: Float32Array<ArrayBuffer>, sampleRate: number): number {
@@ -66,14 +86,18 @@ export default function ViolinTuner() {
   const [freq, setFreq] = useState<number | null>(null);
   const [note, setNote] = useState<NoteInfo | null>(null);
   const [volume, setVolume] = useState<number>(0);
-  const [activeString, setActiveString] = useState<string | null>(null);
+  const [selectedString, setSelectedString] = useState<ViolinString>(STRINGS[0]);
 
   const animRef = useRef<number | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const bufferRef = useRef<Float32Array<ArrayBuffer> | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const smoothedFreqRef = useRef<number | null>(null);
+  const lastUiUpdateRef = useRef(0);
+  const lastSignalRef = useRef(0);
 
-  const detect = useCallback(() => {
+  const detect = useCallback(function detectFrame() {
     if (!analyserRef.current || !bufferRef.current || !audioCtxRef.current) return;
     analyserRef.current.getFloatTimeDomainData(bufferRef.current);
 
@@ -81,22 +105,25 @@ export default function ViolinTuner() {
     for (let i = 0; i < bufferRef.current.length; i++) sum += bufferRef.current[i] ** 2;
     setVolume(Math.min(1, Math.sqrt(sum / bufferRef.current.length) * 10));
 
+    const now = performance.now();
     const f = autoCorrelate(bufferRef.current, audioCtxRef.current.sampleRate);
     if (f > 0) {
-      setFreq(Math.round(f * 10) / 10);
-      const n = freqToNote(f);
-      setNote(n);
-      if (n) {
-        const closest = STRINGS.reduce<ViolinString>((best, s) =>
-          Math.abs(s.freq - n.targetFreq) < Math.abs(best.freq - n.targetFreq) ? s : best,
-          STRINGS[0]
-        );
-        setActiveString(closest.name);
+      lastSignalRef.current = now;
+      if (now - lastUiUpdateRef.current >= 220) {
+        const previous = smoothedFreqRef.current ?? f;
+        const smoothed = previous + (f - previous) * 0.35;
+
+        smoothedFreqRef.current = smoothed;
+        setFreq(Math.round(smoothed * 10) / 10);
+        setNote(freqToNote(smoothed));
+        lastUiUpdateRef.current = now;
       }
-    } else {
+    } else if (now - lastSignalRef.current > 800) {
+      smoothedFreqRef.current = null;
+      setFreq(null);
       setNote(null);
     }
-    animRef.current = requestAnimationFrame(detect);
+    animRef.current = requestAnimationFrame(detectFrame);
   }, []);
 
   const start = async (): Promise<void> => {
@@ -104,12 +131,16 @@ export default function ViolinTuner() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const ctx = new (window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext!)();
       audioCtxRef.current = ctx;
+      streamRef.current = stream;
       const src = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 2048;
       src.connect(analyser);
       analyserRef.current = analyser;
       bufferRef.current = new Float32Array(analyser.fftSize) as Float32Array<ArrayBuffer>;
+      smoothedFreqRef.current = null;
+      lastUiUpdateRef.current = 0;
+      lastSignalRef.current = performance.now();
       setListening(true);
       animRef.current = requestAnimationFrame(detect);
     } catch {
@@ -117,25 +148,43 @@ export default function ViolinTuner() {
     }
   };
 
-  const stop = (): void => {
+  const stop = useCallback((): void => {
     if (animRef.current) cancelAnimationFrame(animRef.current);
-    if (audioCtxRef.current) audioCtxRef.current.close();
+    if (audioCtxRef.current) void audioCtxRef.current.close();
+    if (streamRef.current) streamRef.current.getTracks().forEach((track) => track.stop());
+    audioCtxRef.current = null;
     analyserRef.current = null;
+    streamRef.current = null;
+    smoothedFreqRef.current = null;
     setListening(false);
     setFreq(null);
     setNote(null);
     setVolume(0);
-    setActiveString(null);
+  }, []);
+
+  useEffect(() => () => { stop(); }, [stop]);
+
+  const selectString = (string: ViolinString): void => {
+    setSelectedString(string);
+    setFreq(null);
+    setNote(null);
+    smoothedFreqRef.current = null;
+    lastUiUpdateRef.current = 0;
+    lastSignalRef.current = 0;
   };
 
-  useEffect(() => () => { stop(); }, []);
-
-  const cents = note?.cents ?? 0;
-  const inTune = Math.abs(cents) < 5;
-  const close = Math.abs(cents) < 20;
-  const tuneColor = !note ? "#4a3728" : inTune ? "#e8f5e9" : close ? "#fff8e1" : "#ffebee";
-  const tuneBorder = !note ? "#2a1f18" : inTune ? "#81c784" : close ? "#ffd54f" : "#e57373";
-  const tuneLabel = !note ? "—" : inTune ? "AFINADO" : cents > 0 ? `+${cents}¢` : `${cents}¢`;
+  const cents = freq ? centsFromTarget(freq, selectedString.freq) : 0;
+  const inTune = freq !== null && Math.abs(cents) <= 5;
+  const tuneColor = !freq ? "#4a3728" : inTune ? "#b9f6ca" : "#ffcdd2";
+  const tuneBorder = !freq ? "#2a1f18" : inTune ? "#43a047" : "#d32f2f";
+  const tuneLabel = !freq ? "—" : inTune ? "AFINADO" : cents > 0 ? `+${cents}¢ ALTO` : `${cents}¢ BAIXO`;
+  const guidance = !freq
+    ? `Toque a corda ${selectedString.label}`
+    : inTune
+      ? "Verde: nota afinada no alvo"
+      : cents > 0
+        ? "Vermelho: está alto, afrouxe um pouco"
+        : "Vermelho: está baixo, aperte um pouco";
   const needleX = 50 + Math.max(-47, Math.min(47, (cents / 50) * 47));
 
 return (
@@ -202,22 +251,35 @@ return (
           textAlign: "center",
           marginBottom: "28px",
           padding: "24px 16px 20px",
-          background: "#0a0704",
+          background: freq ? (inTune ? "#07160a" : "#1a0707") : "#0a0704",
           borderRadius: "12px",
-          border: "1px solid #2a1a0e",
+          border: `1px solid ${freq ? tuneBorder : "#2a1a0e"}`,
+          transition: "background 0.2s, border-color 0.2s",
         }}>
           <div style={{
-            fontSize: "clamp(72px,20vw,108px)",
+            fontSize: "clamp(54px,16vw,88px)",
             fontWeight: 300,
             lineHeight: 1,
-            color: note ? tuneColor : "#2a1a0e",
+            color: freq ? tuneColor : "#3d2510",
             letterSpacing: "-3px",
             transition: "color 0.15s",
           }}>
-            {note?.name ?? "·"}
+            {selectedString.label}
           </div>
-          <div style={{ marginTop: "8px", fontSize: "13px", color: "#4a3020", letterSpacing: "1px" }}>
-            {freq ? `${freq} Hz` : "aguardando sinal"}
+          <div style={{ marginTop: "10px", fontSize: "13px", color: freq ? "#f5ede0" : "#4a3020", letterSpacing: "1px" }}>
+            {freq ? `${freq} Hz agora` : "aguardando sinal"}
+          </div>
+          <div style={{ marginTop: "6px", fontSize: "10px", color: "#8b5a2b", letterSpacing: "2px", textTransform: "uppercase" }}>
+            alvo {selectedString.freq.toFixed(2)} Hz · detectado {note ? `${note.label} (${note.name})` : "—"}
+          </div>
+          <div style={{
+            marginTop: "12px",
+            fontSize: "11px",
+            color: freq ? tuneBorder : "#4a3020",
+            letterSpacing: "1px",
+            transition: "color 0.2s",
+          }}>
+            {guidance}
           </div>
         </div>
 
@@ -247,7 +309,7 @@ return (
               background: "#5c3318",
               transform: "translateX(-50%)",
             }} />
-            {note && (
+            {freq && (
               <div style={{
                 position: "absolute",
                 top: "50%",
@@ -266,7 +328,7 @@ return (
             <span style={{ fontSize: "10px", color: "#3d2510", letterSpacing: "1px" }}>♭ BAIXO</span>
             <span style={{
               fontSize: "11px", letterSpacing: "3px",
-              color: note ? tuneBorder : "#2a1a0e",
+              color: freq ? tuneBorder : "#2a1a0e",
               fontFamily: "monospace",
               transition: "color 0.2s",
             }}>
@@ -301,30 +363,36 @@ return (
         {/* String indicators */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "10px", marginBottom: "28px" }}>
           {STRINGS.map((s) => {
-            const isActive = activeString === s.name && listening && note !== null;
+            const isSelected = selectedString.name === s.name;
+            const selectedBackground = freq ? (inTune ? "#08200e" : "#260b0b") : "#1a0f08";
             return (
-              <div key={s.name} style={{
+              <button key={s.name} type="button" onClick={() => selectString(s)} style={{
                 textAlign: "center",
                 padding: "14px 8px",
-                background: isActive ? "#1a0f08" : "#0a0704",
-                border: `1px solid ${isActive ? "#8b5a2b" : "#1a1209"}`,
+                background: isSelected ? selectedBackground : "#0a0704",
+                border: `1px solid ${isSelected ? tuneBorder : "#1a1209"}`,
                 borderRadius: "10px",
                 transition: "all 0.2s",
-                boxShadow: isActive ? "0 0 16px rgba(139,90,43,0.25)" : "none",
+                boxShadow: isSelected && freq ? `0 0 16px ${tuneBorder}33` : "none",
+                cursor: "pointer",
+                fontFamily: "'Georgia', serif",
               }}>
                 <div style={{
                   fontSize: "28px",
                   fontWeight: 300,
-                  color: isActive ? "#f5ede0" : "#3d2510",
+                  color: isSelected ? "#f5ede0" : "#3d2510",
                   lineHeight: 1,
                   transition: "color 0.2s",
                 }}>
-                  {s.name}
+                  {s.label}
                 </div>
-                <div style={{ fontSize: "9px", color: isActive ? "#8b5a2b" : "#2a1a0e", marginTop: "4px", letterSpacing: "1px" }}>
-                  {s.freq}
+                <div style={{ fontSize: "10px", color: isSelected ? "#8b5a2b" : "#2a1a0e", marginTop: "4px", letterSpacing: "1px" }}>
+                  {s.name} · {s.freq.toFixed(2)} Hz
                 </div>
-              </div>
+                <div style={{ fontSize: "8px", color: isSelected ? "#6b3d1e" : "#24160c", marginTop: "3px", letterSpacing: "1px", textTransform: "uppercase" }}>
+                  {s.hint}
+                </div>
+              </button>
             );
           })}
         </div>
@@ -348,7 +416,7 @@ return (
             transition: "all 0.2s",
           }}
         >
-          {listening ? "⏹  Parar" : "🎙  Iniciar Afinação"}
+          {listening ? "⏹  Parar" : `🎙  Afinar ${selectedString.label}`}
         </button>
       </div>
 
@@ -363,7 +431,7 @@ return (
       }} />
 
       <p style={{ marginTop: "20px", fontSize: "10px", letterSpacing: "4px", color: "#2a1a0e", textTransform: "uppercase" }}>
-        G · D · A · E
+        Sol · Ré · Lá · Mi
       </p>
     </div>
   );
